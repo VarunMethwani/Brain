@@ -79,6 +79,7 @@ class IndexStats:
     skipped_files: int
     removed_files: int
     unchanged_files: int = 0
+    indexed_relationships: int = 0
 
 
 _PATTERNS = (
@@ -141,6 +142,41 @@ def extract_symbols(text: str, language: str = "") -> list[tuple[str, str, int, 
     return symbols
 
 
+def extract_relationships(text: str, language: str = "") -> list[tuple[str | None, str, str, str | None, str]]:
+    """Extract conservative file-level import edges without executing code."""
+
+    relationships: list[tuple[str | None, str, str, str | None, str]] = []
+    if language == "python":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        relationships.append((None, "imports", alias.name, None, "verified"))
+                elif isinstance(node, ast.ImportFrom):
+                    module = "." * node.level + (node.module or "")
+                    if module:
+                        relationships.append((None, "imports", module, None, "verified"))
+            return list(dict.fromkeys(relationships))
+
+    if language in {"javascript", "typescript", "vue"}:
+        patterns = (
+            re.compile(r"^\s*import(?:[\s\S]*?)?from\s*[\"']([^\"']+)[\"']", re.MULTILINE),
+            re.compile(r"^\s*import\s*[\"']([^\"']+)[\"']", re.MULTILINE),
+            re.compile(r"\brequire\(\s*[\"']([^\"']+)[\"']\s*\)", re.MULTILINE),
+        )
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                target = match.group(1)
+                target_path = target[2:] if target.startswith("./") else None
+                relationships.append((None, "imports", target, target_path, "inferred"))
+        return list(dict.fromkeys(relationships))
+    return relationships
+
+
 class CodebaseIndexer:
     def __init__(self, policy: FilePolicy, database: IndexDatabase) -> None:
         self.policy = policy
@@ -152,6 +188,7 @@ class CodebaseIndexer:
         skipped_files = 0
         present_paths: set[str] = set()
         unchanged_files = 0
+        indexed_relationships = 0
 
         for relative in self.policy.iter_indexable_files(SUPPORTED_EXTENSIONS):
             try:
@@ -173,18 +210,29 @@ class CodebaseIndexer:
             ):
                 unchanged_files += 1
                 continue
-            symbols = extract_symbols(text, LANGUAGES.get(path.suffix.lower(), ""))
+            language = LANGUAGES.get(path.suffix.lower(), "")
+            symbols = extract_symbols(text, language)
+            relationships = extract_relationships(text, language)
             self.database.replace_file(
                 path=relative,
                 sha256=digest,
                 size_bytes=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
-                language=LANGUAGES.get(path.suffix.lower(), path.suffix.lower().lstrip(".")),
+                language=language or path.suffix.lower().lstrip("."),
                 symbols=symbols,
+                relationships=relationships,
             )
             indexed_files += 1
             indexed_symbols += len(symbols)
+            indexed_relationships += len(relationships)
 
         removed_files = self.database.remove_missing(present_paths)
         self.database.commit()
-        return IndexStats(indexed_files, indexed_symbols, skipped_files, removed_files, unchanged_files)
+        return IndexStats(
+            indexed_files,
+            indexed_symbols,
+            skipped_files,
+            removed_files,
+            unchanged_files,
+            indexed_relationships,
+        )

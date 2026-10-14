@@ -62,6 +62,19 @@ class IndexDatabase:
             );
             CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name);
             CREATE INDEX IF NOT EXISTS symbols_path_idx ON symbols(path);
+            CREATE TABLE IF NOT EXISTS relationships (
+                id INTEGER PRIMARY KEY,
+                source_path TEXT NOT NULL REFERENCES files(path) ON DELETE CASCADE,
+                source_symbol TEXT,
+                relation TEXT NOT NULL,
+                target TEXT NOT NULL,
+                target_path TEXT,
+                confidence TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS relationships_source_idx
+                ON relationships(source_path, relation);
+            CREATE INDEX IF NOT EXISTS relationships_target_idx
+                ON relationships(target, target_path);
 
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +167,7 @@ class IndexDatabase:
         mtime_ns: int,
         language: str,
         symbols: Iterable[tuple[str, str, int, int, str]],
+        relationships: Iterable[tuple[str | None, str, str, str | None, str]] = (),
     ) -> None:
         self.connection.execute(
             """
@@ -168,12 +182,21 @@ class IndexDatabase:
             (path, sha256, size_bytes, mtime_ns, language),
         )
         self.connection.execute("DELETE FROM symbols WHERE path = ?", (path,))
+        self.connection.execute("DELETE FROM relationships WHERE source_path = ?", (path,))
         self.connection.executemany(
             """
             INSERT INTO symbols(path, name, kind, start_line, end_line, signature)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             ((path, name, kind, start, end, signature) for name, kind, start, end, signature in symbols),
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO relationships(source_path, source_symbol, relation, target, target_path, confidence)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ((path, source_symbol, relation, target, target_path, confidence)
+             for source_symbol, relation, target, target_path, confidence in relationships),
         )
 
     def remove_missing(self, paths: set[str]) -> int:
@@ -222,6 +245,30 @@ class IndexDatabase:
             (path, name),
         ).fetchone()
         return dict(row) if row else None
+
+    def get_dependencies(self, path: str, limit: int = 100) -> list[dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            SELECT source_path, source_symbol, relation, target, target_path, confidence
+            FROM relationships WHERE source_path = ?
+            ORDER BY relation, target LIMIT ?
+            """,
+            (path, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def get_impact(self, target: str, limit: int = 100) -> list[dict[str, object]]:
+        needle = f"%{target}%"
+        rows = self.connection.execute(
+            """
+            SELECT source_path, source_symbol, relation, target, target_path, confidence
+            FROM relationships
+            WHERE target LIKE ? COLLATE NOCASE OR target_path LIKE ? COLLATE NOCASE
+            ORDER BY source_path, relation, target LIMIT ?
+            """,
+            (needle, needle, limit),
+        )
+        return [dict(row) for row in rows]
 
     # --- second-brain memory -------------------------------------------------
 

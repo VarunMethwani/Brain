@@ -43,6 +43,18 @@ def create_server(root: Path | str) -> Any:
         return service.search_symbols(query, limit)
 
     @server.tool()
+    def get_dependencies(path: str, limit: int = 100) -> dict[str, object]:
+        """List conservative import relationships for one indexed source file."""
+
+        return service.get_dependencies(path, limit)
+
+    @server.tool()
+    def get_impact(target: str, limit: int = 100) -> dict[str, object]:
+        """Find indexed files whose imports mention a module or package target."""
+
+        return service.get_impact(target, limit)
+
+    @server.tool()
     def read_source(path: str, start_line: int | None = None, end_line: int | None = None) -> dict[str, object]:
         """Read an allowed source path; ignored, secret, VCS, and symlinked paths are denied."""
 

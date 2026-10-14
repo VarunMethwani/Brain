@@ -17,7 +17,7 @@ class SecondBrainTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root / "app.py").write_text(
-            "def protect_paths():\n    return True\n\nclass ContextBuilder:\n    pass\n",
+            "import json\nfrom pathlib import Path\n\ndef protect_paths():\n    return True\n\nclass ContextBuilder:\n    pass\n",
             encoding="utf-8",
         )
         policy = FilePolicy(self.root)
@@ -143,6 +143,15 @@ class SecondBrainTests(unittest.TestCase):
         self.assertEqual(0, first["unchanged_files"])
         self.assertEqual(0, second["indexed_files"])
         self.assertEqual(1, second["unchanged_files"])
+
+    def test_import_graph_supports_dependencies_and_impact(self) -> None:
+        self.service.index_repository()
+        dependencies = self.service.get_dependencies("app.py")["relationships"]
+        targets = {item["target"] for item in dependencies}
+        self.assertIn("json", targets)
+        self.assertIn("pathlib", targets)
+        impact = self.service.get_impact("pathlib")["relationships"]
+        self.assertTrue(any(item["source_path"] == "app.py" for item in impact))
 
     def test_python_ast_ranges_include_nested_class_methods(self) -> None:
         symbols = extract_symbols(

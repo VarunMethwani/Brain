@@ -47,6 +47,7 @@ class CodebaseService:
             "skipped_files": stats.skipped_files,
             "removed_files": stats.removed_files,
             "unchanged_files": stats.unchanged_files,
+            "indexed_relationships": stats.indexed_relationships,
         }
 
     def list_files(self, limit: int = 1000) -> dict[str, object]:
@@ -59,6 +60,28 @@ class CodebaseService:
         limit = max(1, min(limit, 500))
         return {
             "matches": self.database.search_symbols(query, limit),
+            "untrusted": True,
+            "security_note": UNTRUSTED_CONTENT_NOTE,
+        }
+
+    def get_dependencies(self, path: str, limit: int = 100) -> dict[str, object]:
+        safe_path = path.replace("\\", "/")
+        self.policy.validate_read(safe_path)
+        limit = max(1, min(limit, 500))
+        return {
+            "path": safe_path,
+            "relationships": self.database.get_dependencies(safe_path, limit),
+            "untrusted": True,
+            "security_note": UNTRUSTED_CONTENT_NOTE,
+        }
+
+    def get_impact(self, target: str, limit: int = 100) -> dict[str, object]:
+        if not isinstance(target, str) or not target.strip() or len(target) > 300:
+            raise ValueError("target must contain 1-300 characters")
+        limit = max(1, min(limit, 500))
+        return {
+            "target": target,
+            "relationships": self.database.get_impact(target.strip(), limit),
             "untrusted": True,
             "security_note": UNTRUSTED_CONTENT_NOTE,
         }

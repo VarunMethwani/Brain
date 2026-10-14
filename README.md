@@ -167,6 +167,7 @@ The MCP tools are:
 | `archive_memory` | Remove an item from active retrieval without destructive deletion. |
 | `index_repository` | Safely scan allowed source files into the local symbol index. |
 | `search_symbols` | Find functions and classes without loading the whole repository. |
+| `get_dependencies` / `get_impact` | Inspect conservative import relationships and likely affected indexed files. |
 | `read_source` / `read_symbol_source` | Read approved source ranges through the same path policy. |
 
 Paste the following into the coding agent’s project or system instructions to
