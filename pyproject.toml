@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "safe-codebase-mcp"
+version = "0.1.0"
+description = "A local-first, security-hardened MCP server for searching source symbols"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Safe Codebase MCP contributors" }]
+dependencies = ["mcp>=2.2,<3"]
+
+[project.optional-dependencies]
+dev = [
+  "bandit>=1.7,<2",
+  "pip-audit>=2.7,<3",
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+safe-codebase-mcp = "safe_codebase_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
