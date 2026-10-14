@@ -208,6 +208,17 @@ class SecondBrainTests(unittest.TestCase):
         self.assertIn("Finish the context engine", context["context"])
         self.assertIn("Add retrieval benchmarks", context["context"])
 
+    def test_expand_context_fetches_selected_records_with_its_own_budget(self) -> None:
+        memory = self.service.remember(
+            title="Detailed implementation note",
+            content="The selected memory should be fetched only after the compact context points to it.",
+            kind="note",
+        )
+        expanded = self.service.expand_context([int(memory["id"])], max_tokens=800)
+        self.assertIn("Detailed implementation note", expanded["context"])
+        self.assertIn(int(memory["id"]), expanded["memory_ids"])
+        self.assertLessEqual(int(expanded["estimated_tokens"]), 800)
+
 
 if __name__ == "__main__":
     unittest.main()

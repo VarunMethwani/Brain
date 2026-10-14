@@ -201,6 +201,17 @@ def create_server(root: Path | str) -> Any:
         return service.get_checkpoint()
 
     @server.tool()
+    def expand_context(
+        memory_ids: list[int],
+        profile: str = "standard",
+        max_tokens: int | None = None,
+        max_chars: int | None = None,
+    ) -> dict[str, object]:
+        """Fetch selected full memory records under a separate bounded budget."""
+
+        return service.expand_context(memory_ids, profile, max_tokens, max_chars)
+
+    @server.tool()
     def build_context(
         query: str | None = None,
         profile: str = "standard",
