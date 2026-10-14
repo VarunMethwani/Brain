@@ -110,7 +110,7 @@ def make_candidates(
 
 def compact_memory_ref(candidate: Candidate) -> dict[str, object]:
     record = candidate.record
-    return {
+    result = {
         "id": record["id"],
         "kind": record["kind"],
         "title": record["title"],
@@ -122,6 +122,10 @@ def compact_memory_ref(candidate: Candidate) -> dict[str, object]:
         "updated_at": record["updated_at"],
         "reason": candidate.reason,
     }
+    for key in ("source_ref", "valid_from", "valid_until", "supersedes_id", "code_hash", "commit_sha", "verified_at", "session_id"):
+        if record.get(key) is not None:
+            result[key] = record[key]
+    return result
 
 
 def compact_code_ref(match: dict[str, object]) -> dict[str, object]:

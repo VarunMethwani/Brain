@@ -64,6 +64,15 @@ def create_server(root: Path | str) -> Any:
         source: str = "agent",
         status: str = "active",
         pinned: bool = False,
+        source_ref: str | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        supersedes_id: int | None = None,
+        code_hash: str | None = None,
+        commit_sha: str | None = None,
+        verified_at: str | None = None,
+        related_entity_ids: list[str] | None = None,
+        session_id: str | None = None,
         memory_id: int | None = None,
     ) -> dict[str, object]:
         """Store or revise a bounded fact, decision, constraint, task, note, or session summary."""
@@ -77,6 +86,15 @@ def create_server(root: Path | str) -> Any:
             source=source,
             status=status,
             pinned=pinned,
+            source_ref=source_ref,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            supersedes_id=supersedes_id,
+            code_hash=code_hash,
+            commit_sha=commit_sha,
+            verified_at=verified_at,
+            related_entity_ids=related_entity_ids,
+            session_id=session_id,
             memory_id=memory_id,
         )
 
@@ -141,10 +159,46 @@ def create_server(root: Path | str) -> Any:
         return service.archive_memory(memory_id)
 
     @server.tool()
+    def verify_memory(memory_id: int) -> dict[str, object]:
+        """Mark a memory as checked now without changing its content."""
+
+        return service.verify_memory(memory_id)
+
+    @server.tool()
     def save_session_summary(title: str, summary: str, tags: list[str] | None = None) -> dict[str, object]:
         """Persist a concise summary of the current coding session for later agents."""
 
         return service.save_session_summary(title, summary, tags)
+
+    @server.tool()
+    def checkpoint_session(
+        session_id: str,
+        objective: str,
+        next_action: str,
+        completed_work: list[str] | None = None,
+        modified_files: list[str] | None = None,
+        verified_decisions: list[int] | None = None,
+        unresolved_blockers: list[str] | None = None,
+        repository_revision: str | None = None,
+    ) -> dict[str, object]:
+        """Save a structured handoff checkpoint for resuming a coding session."""
+
+        return service.checkpoint_session(
+            session_id=session_id,
+            objective=objective,
+            completed_work=completed_work,
+            modified_files=modified_files,
+            verified_decisions=verified_decisions,
+            unresolved_blockers=unresolved_blockers,
+            next_action=next_action,
+            repository_revision=repository_revision,
+        )
+
+    @server.tool()
+    def get_checkpoint() -> dict[str, object]:
+        """Return the latest structured session handoff checkpoint."""
+
+        return service.get_checkpoint()
 
     @server.tool()
     def build_context(

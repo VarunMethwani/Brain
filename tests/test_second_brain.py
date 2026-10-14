@@ -156,6 +156,58 @@ class SecondBrainTests(unittest.TestCase):
         self.assertEqual("method", run[1])
         self.assertEqual(3, run[3])
 
+    def test_memory_supersession_and_validity(self) -> None:
+        old = self.service.remember(
+            title="Old storage decision",
+            content="Use the first storage approach.",
+            kind="decision",
+            source_ref="docs/architecture.md",
+            verified_at="2026-10-01T12:00:00Z",
+        )
+        current = self.service.remember(
+            title="Current storage decision",
+            content="Use the replacement storage approach.",
+            kind="decision",
+            supersedes_id=int(old["id"]),
+            commit_sha="a" * 40,
+            related_entity_ids=["module:storage"],
+            session_id="session-1",
+        )
+        self.assertEqual("superseded", self.database.get_memory(int(old["id"]))["status"])
+        self.assertEqual("a" * 40, current["commit_sha"])
+        self.assertEqual(["module:storage"], current["related_entity_ids"])
+        matches = self.service.recall("storage approach")["matches"]
+        self.assertEqual(["Current storage decision"], [item["title"] for item in matches])
+
+        expired = self.service.remember(
+            title="Expired note",
+            content="This should not be active anymore.",
+            valid_until="2020-01-01T00:00:00Z",
+        )
+        self.assertEqual("active", expired["status"])
+        self.assertNotIn(
+            int(expired["id"]),
+            [int(item["id"]) for item in self.service.recall("active anymore")["matches"]],
+        )
+
+    def test_structured_checkpoint_is_recovered_in_context(self) -> None:
+        self.service.checkpoint_session(
+            session_id="session-42",
+            objective="Finish the context engine",
+            completed_work=["Added token budgets"],
+            modified_files=["src/safe_codebase_mcp/service.py"],
+            verified_decisions=[],
+            unresolved_blockers=["Benchmark suite still needed"],
+            next_action="Add retrieval benchmarks",
+            repository_revision="abc123",
+        )
+        checkpoint = self.service.get_checkpoint()["checkpoint"]
+        self.assertEqual("session-42", checkpoint["session_id"])
+        context = self.service.build_context(profile="minimal")
+        self.assertTrue(context["checkpoint_included"])
+        self.assertIn("Finish the context engine", context["context"])
+        self.assertIn("Add retrieval benchmarks", context["context"])
+
 
 if __name__ == "__main__":
     unittest.main()

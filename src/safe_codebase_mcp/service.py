@@ -76,6 +76,15 @@ class CodebaseService:
         source: str = "agent",
         status: str = "active",
         pinned: bool = False,
+        source_ref: str | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        supersedes_id: int | None = None,
+        code_hash: str | None = None,
+        commit_sha: str | None = None,
+        verified_at: str | None = None,
+        related_entity_ids: list[str] | None = None,
+        session_id: str | None = None,
         memory_id: int | None = None,
     ) -> dict[str, object]:
         validated = validate_memory(
@@ -87,6 +96,15 @@ class CodebaseService:
             source=source,
             status=status,
             pinned=pinned,
+            source_ref=source_ref,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            supersedes_id=supersedes_id,
+            code_hash=code_hash,
+            commit_sha=commit_sha,
+            verified_at=verified_at,
+            related_entity_ids=related_entity_ids,
+            session_id=session_id,
         )
         return self.database.remember(
             title=validated[0],
@@ -97,6 +115,15 @@ class CodebaseService:
             source=validated[5],
             status=validated[6],
             pinned=validated[7],
+            source_ref=validated[8],
+            valid_from=validated[9],
+            valid_until=validated[10],
+            supersedes_id=validated[11],
+            code_hash=validated[12],
+            commit_sha=validated[13],
+            verified_at=validated[14],
+            related_entity_ids=validated[15],
+            session_id=validated[16],
             memory_id=memory_id,
         )
 
@@ -150,6 +177,11 @@ class CodebaseService:
         if not isinstance(memory_id, int) or memory_id <= 0:
             raise ValueError("memory_id must be a positive integer")
         return self.database.archive_memory(memory_id)
+
+    def verify_memory(self, memory_id: int) -> dict[str, object]:
+        if not isinstance(memory_id, int) or memory_id <= 0:
+            raise ValueError("memory_id must be a positive integer")
+        return self.database.verify_memory(memory_id)
 
     def set_focus(
         self,
@@ -210,6 +242,67 @@ class CodebaseService:
             source="agent",
         )
 
+    def checkpoint_session(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        completed_work: list[str] | None = None,
+        modified_files: list[str] | None = None,
+        verified_decisions: list[int] | None = None,
+        unresolved_blockers: list[str] | None = None,
+        next_action: str,
+        repository_revision: str | None = None,
+    ) -> dict[str, object]:
+        session_id = session_id.strip() if isinstance(session_id, str) else ""
+        objective = objective.strip() if isinstance(objective, str) else ""
+        next_action = next_action.strip() if isinstance(next_action, str) else ""
+        if not session_id or len(session_id) > 128:
+            raise ValueError("session_id must contain 1-128 characters")
+        if not objective or len(objective) > 1_000:
+            raise ValueError("objective must contain 1-1000 characters")
+        if not next_action or len(next_action) > 1_000:
+            raise ValueError("next_action must contain 1-1000 characters")
+        completed_work = self._bounded_list(completed_work, "completed_work", 30, 500)
+        modified_files = self._bounded_list(modified_files, "modified_files", 100, 500)
+        unresolved_blockers = self._bounded_list(unresolved_blockers, "unresolved_blockers", 30, 500)
+        if verified_decisions is None:
+            verified_decisions = []
+        if not isinstance(verified_decisions, list) or len(verified_decisions) > 50:
+            raise ValueError("verified_decisions must be a list of at most 50 IDs")
+        if any(not isinstance(item, int) or item <= 0 for item in verified_decisions):
+            raise ValueError("verified_decisions must contain positive memory IDs")
+        if repository_revision is not None:
+            repository_revision = repository_revision.strip()
+            if not repository_revision or len(repository_revision) > 128:
+                raise ValueError("repository_revision must contain 1-128 characters")
+        for item in [objective, next_action, *completed_work, *modified_files, *unresolved_blockers]:
+            validate_memory(
+                title="session checkpoint",
+                content=item,
+                kind="session_summary",
+                tags=[],
+                priority=3,
+                source="agent",
+                status="active",
+                pinned=False,
+            )
+        checkpoint = {
+            "session_id": session_id,
+            "objective": objective,
+            "completed_work": completed_work,
+            "modified_files": modified_files,
+            "verified_decisions": verified_decisions,
+            "unresolved_blockers": unresolved_blockers,
+            "next_action": next_action,
+            "repository_revision": repository_revision,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        return self.database.set_state("checkpoint", checkpoint)
+
+    def get_checkpoint(self) -> dict[str, object]:
+        return {"checkpoint": self.database.get_state("checkpoint"), "untrusted": True}
+
     def build_context(
         self,
         query: str | None = None,
@@ -222,6 +315,7 @@ class CodebaseService:
         profile, token_budget = resolve_budget(profile=profile, max_tokens=max_tokens, max_chars=max_chars)
         normalized_query = query.strip() if query else None
         focus = self.database.get_state("focus")
+        checkpoint = self.database.get_state("checkpoint")
         query_matches = self.database.search_memories(normalized_query, limit=30) if normalized_query else []
         candidates = make_candidates(
             query=normalized_query,
@@ -235,6 +329,7 @@ class CodebaseService:
         code_matches = self.database.search_symbols(normalized_query, 12) if normalized_query else []
         return self._assemble_context(
             focus=focus,
+            checkpoint=checkpoint,
             candidates=candidates,
             code_matches=code_matches,
             query=normalized_query,
@@ -246,6 +341,7 @@ class CodebaseService:
         self,
         *,
         focus: object,
+        checkpoint: object,
         candidates: list[Candidate],
         code_matches: list[dict[str, object]],
         query: str | None,
@@ -284,6 +380,8 @@ class CodebaseService:
         ]
         if focus:
             rendered.extend(["", "## CURRENT FOCUS", self._render_focus(focus)])
+        if checkpoint:
+            rendered.extend(["", "## SESSION CHECKPOINT", self._render_checkpoint(checkpoint)])
         rendered.extend(["", "## MEMORY"])
         included: list[Candidate] = []
         truncated = False
@@ -294,6 +392,7 @@ class CodebaseService:
             payload = self._context_payload(
                 rendered=rendered,
                 focus=focus,
+                checkpoint=checkpoint,
                 included=included,
                 code_matches=[],
                 query=query,
@@ -318,6 +417,7 @@ class CodebaseService:
                 payload = self._context_payload(
                     rendered=rendered,
                     focus=focus,
+                    checkpoint=checkpoint,
                     included=included,
                     code_matches=[*included_code_refs, match],
                     query=query,
@@ -334,6 +434,7 @@ class CodebaseService:
         payload = self._context_payload(
             rendered=rendered,
             focus=focus,
+            checkpoint=checkpoint,
             included=included,
             code_matches=included_code_refs,
             query=query,
@@ -366,6 +467,7 @@ class CodebaseService:
         *,
         rendered: list[str],
         focus: object,
+        checkpoint: object,
         included: list[Candidate],
         code_matches: list[dict[str, object]],
         query: str | None,
@@ -378,6 +480,7 @@ class CodebaseService:
             "max_tokens": token_budget,
             "query": query,
             "focus_included": bool(focus),
+            "checkpoint_included": bool(checkpoint),
             "memory_refs": [compact_memory_ref(candidate) for candidate in included],
             "code_refs": code_matches,
             "included_memory_ids": [int(candidate.record["id"]) for candidate in included],
@@ -398,6 +501,21 @@ class CodebaseService:
         return "\n".join(lines)
 
     @staticmethod
+    def _render_checkpoint(checkpoint: object) -> str:
+        if not isinstance(checkpoint, dict):
+            return str(checkpoint)
+        lines = [f"Session: {checkpoint.get('session_id', '')}", f"Objective: {checkpoint.get('objective', '')}"]
+        for key in ("completed_work", "modified_files", "verified_decisions", "unresolved_blockers"):
+            values = checkpoint.get(key) or []
+            if values:
+                lines.append(f"{key.replace('_', ' ').title()}:")
+                lines.extend(f"- {value}" for value in values)
+        lines.append(f"Next action: {checkpoint.get('next_action', '')}")
+        if checkpoint.get("repository_revision"):
+            lines.append(f"Repository revision: {checkpoint['repository_revision']}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _render_memory(record: dict[str, object]) -> str:
         tags = ", ".join(str(tag) for tag in record.get("tags", []))
         metadata = (
@@ -406,6 +524,12 @@ class CodebaseService:
         )
         if tags:
             metadata += f" tags={tags}"
+        if record.get("source_ref"):
+            metadata += f" source_ref={record['source_ref']}"
+        if record.get("verified_at"):
+            metadata += " verified"
+        if record.get("supersedes_id"):
+            metadata += f" supersedes={record['supersedes_id']}"
         return f"### {record['title']} ({metadata})\n{record['content']}"
 
     def read_source(self, path: str, start_line: int | None = None, end_line: int | None = None) -> dict[str, object]:

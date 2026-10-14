@@ -20,8 +20,19 @@ def _memory_dict(row: sqlite3.Row) -> dict[str, object]:
         result["tags"] = json.loads(str(result.pop("tags_json")))
     except (TypeError, ValueError, json.JSONDecodeError):
         result["tags"] = []
+    try:
+        result["related_entity_ids"] = json.loads(str(result.pop("related_entity_ids_json")))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        result["related_entity_ids"] = []
     result["pinned"] = bool(result["pinned"])
     return result
+
+
+_MEMORY_COLUMNS = """
+    id, kind, title, content, tags_json, status, priority, source, pinned,
+    created_at, updated_at, source_ref, valid_from, valid_until, supersedes_id,
+    code_hash, commit_sha, verified_at, related_entity_ids_json, session_id
+"""
 
 
 class IndexDatabase:
@@ -63,10 +74,21 @@ class IndexDatabase:
                 source TEXT NOT NULL DEFAULT 'agent',
                 pinned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                source_ref TEXT,
+                valid_from TEXT,
+                valid_until TEXT,
+                supersedes_id INTEGER,
+                code_hash TEXT,
+                commit_sha TEXT,
+                verified_at TEXT,
+                related_entity_ids_json TEXT NOT NULL DEFAULT '[]',
+                session_id TEXT
             );
             CREATE INDEX IF NOT EXISTS memories_kind_status_idx
                 ON memories(kind, status, priority, updated_at);
+            CREATE INDEX IF NOT EXISTS memories_validity_idx
+                ON memories(valid_from, valid_until);
             CREATE TABLE IF NOT EXISTS project_state (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -74,8 +96,28 @@ class IndexDatabase:
             );
             """
         )
+        self._migrate_memory_columns()
         self._fts_available = self._init_memory_search()
         self.connection.commit()
+
+    def _migrate_memory_columns(self) -> None:
+        existing = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(memories)")
+        }
+        additions = {
+            "source_ref": "TEXT",
+            "valid_from": "TEXT",
+            "valid_until": "TEXT",
+            "supersedes_id": "INTEGER",
+            "code_hash": "TEXT",
+            "commit_sha": "TEXT",
+            "verified_at": "TEXT",
+            "related_entity_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "session_id": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.connection.execute(f"ALTER TABLE memories ADD COLUMN {column} {definition}")
 
     def _init_memory_search(self) -> bool:
         try:
@@ -207,19 +249,51 @@ class IndexDatabase:
         source: str,
         status: str,
         pinned: bool,
+        source_ref: str | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        supersedes_id: int | None = None,
+        code_hash: str | None = None,
+        commit_sha: str | None = None,
+        verified_at: str | None = None,
+        related_entity_ids: list[str] | None = None,
+        session_id: str | None = None,
         memory_id: int | None = None,
     ) -> dict[str, object]:
         timestamp = _now()
         tags_json = json.dumps(tags, ensure_ascii=False)
+        related_entity_ids_json = json.dumps(related_entity_ids or [], ensure_ascii=False)
         if memory_id is None:
             cursor = self.connection.execute(
                 """
                 INSERT INTO memories(
                     kind, title, content, tags_json, status, priority, source,
-                    pinned, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    pinned, created_at, updated_at, source_ref, valid_from,
+                    valid_until, supersedes_id, code_hash, commit_sha,
+                    verified_at, related_entity_ids_json, session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (kind, title, content, tags_json, status, priority, source, int(pinned), timestamp, timestamp),
+                (
+                    kind,
+                    title,
+                    content,
+                    tags_json,
+                    status,
+                    priority,
+                    source,
+                    int(pinned),
+                    timestamp,
+                    timestamp,
+                    source_ref,
+                    valid_from,
+                    valid_until,
+                    supersedes_id,
+                    code_hash,
+                    commit_sha,
+                    verified_at,
+                    related_entity_ids_json,
+                    session_id,
+                ),
             )
             memory_id = int(cursor.lastrowid)
         else:
@@ -229,10 +303,42 @@ class IndexDatabase:
             self.connection.execute(
                 """
                 UPDATE memories SET kind = ?, title = ?, content = ?, tags_json = ?,
-                    status = ?, priority = ?, source = ?, pinned = ?, updated_at = ?
+                    status = ?, priority = ?, source = ?, pinned = ?, updated_at = ?,
+                    source_ref = ?, valid_from = ?, valid_until = ?, supersedes_id = ?,
+                    code_hash = ?, commit_sha = ?, verified_at = ?,
+                    related_entity_ids_json = ?, session_id = ?
                 WHERE id = ?
                 """,
-                (kind, title, content, tags_json, status, priority, source, int(pinned), timestamp, memory_id),
+                (
+                    kind,
+                    title,
+                    content,
+                    tags_json,
+                    status,
+                    priority,
+                    source,
+                    int(pinned),
+                    timestamp,
+                    source_ref,
+                    valid_from,
+                    valid_until,
+                    supersedes_id,
+                    code_hash,
+                    commit_sha,
+                    verified_at,
+                    related_entity_ids_json,
+                    session_id,
+                    memory_id,
+                ),
+            )
+        if supersedes_id is not None and supersedes_id != memory_id:
+            self.connection.execute(
+                """
+                UPDATE memories SET status = 'superseded', valid_until = COALESCE(valid_until, ?),
+                    pinned = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, timestamp, supersedes_id),
             )
         self._sync_memory_search(memory_id)
         self.connection.commit()
@@ -240,11 +346,7 @@ class IndexDatabase:
 
     def get_memory(self, memory_id: int) -> dict[str, object] | None:
         row = self.connection.execute(
-            """
-            SELECT id, kind, title, content, tags_json, status, priority, source,
-                   pinned, created_at, updated_at
-            FROM memories WHERE id = ?
-            """,
+            f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE id = ?",
             (memory_id,),
         ).fetchone()
         return _memory_dict(row) if row else None
@@ -275,13 +377,16 @@ class IndexDatabase:
         if status:
             clauses.append("status = ?")
             parameters.append(status)
+            if status in {"active", "blocked"}:
+                now = _now()
+                clauses.extend(["(valid_from IS NULL OR valid_from <= ?)", "(valid_until IS NULL OR valid_until > ?)"])
+                parameters.extend([now, now])
         if pinned_only:
             clauses.append("pinned = 1")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         rows = self.connection.execute(
             f"""
-            SELECT id, kind, title, content, tags_json, status, priority, source,
-                   pinned, created_at, updated_at
+            SELECT {_MEMORY_COLUMNS}
             FROM memories{where}
             ORDER BY pinned DESC, priority DESC, updated_at DESC, id DESC
             LIMIT ?
@@ -293,15 +398,16 @@ class IndexDatabase:
     def list_open_tasks(self, limit: int = 100) -> list[dict[str, object]]:
         rows = self.connection.execute(
             """
-            SELECT id, kind, title, content, tags_json, status, priority, source,
-                   pinned, created_at, updated_at
+            SELECT """ + _MEMORY_COLUMNS + """
             FROM memories
             WHERE kind = 'task' AND status IN ('active', 'blocked')
+              AND (valid_from IS NULL OR valid_from <= ?)
+              AND (valid_until IS NULL OR valid_until > ?)
             ORDER BY CASE status WHEN 'blocked' THEN 0 ELSE 1 END,
                      pinned DESC, priority DESC, updated_at DESC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            (_now(), _now(), limit),
         )
         return [_memory_dict(row) for row in rows]
 
@@ -337,8 +443,13 @@ class IndexDatabase:
             # OR plus prefix matching avoids dropping useful memories merely
             # because one natural-language term was expressed differently.
             fts_query = " OR ".join('"' + token.replace('"', "") + '"*' for token in tokens)
-            clauses = ["memory_fts MATCH ?"]
-            parameters: list[object] = [fts_query]
+            now = _now()
+            clauses = [
+                "memory_fts MATCH ?",
+                "(m.valid_from IS NULL OR m.valid_from <= ?)",
+                "(m.valid_until IS NULL OR m.valid_until > ?)",
+            ]
+            parameters: list[object] = [fts_query, now, now]
             if kind:
                 clauses.append("m.kind = ?")
                 parameters.append(kind)
@@ -347,9 +458,12 @@ class IndexDatabase:
                 f"""
                 SELECT m.id, m.kind, m.title, m.content, m.tags_json, m.status,
                        m.priority, m.source, m.pinned, m.created_at, m.updated_at,
+                       m.source_ref, m.valid_from, m.valid_until, m.supersedes_id,
+                       m.code_hash, m.commit_sha, m.verified_at,
+                       m.related_entity_ids_json, m.session_id,
                        bm25(memory_fts) AS score
                 FROM memory_fts JOIN memories AS m ON m.id = memory_fts.memory_id
-                WHERE {' AND '.join(clauses)} AND m.status != 'archived'
+                WHERE {' AND '.join(clauses)} AND m.status NOT IN ('archived', 'superseded')
                 ORDER BY score, m.pinned DESC, m.priority DESC, m.updated_at DESC
                 LIMIT ?
                 """,
@@ -357,8 +471,13 @@ class IndexDatabase:
             )
         else:
             needle = f"%{query}%"
-            clauses = ["(m.title LIKE ? OR m.content LIKE ? OR m.tags_json LIKE ?)"]
-            parameters = [needle, needle, needle]
+            now = _now()
+            clauses = [
+                "(m.title LIKE ? OR m.content LIKE ? OR m.tags_json LIKE ?)",
+                "(m.valid_from IS NULL OR m.valid_from <= ?)",
+                "(m.valid_until IS NULL OR m.valid_until > ?)",
+            ]
+            parameters = [needle, needle, needle, now, now]
             if kind:
                 clauses.append("m.kind = ?")
                 parameters.append(kind)
@@ -367,15 +486,28 @@ class IndexDatabase:
                 f"""
                 SELECT m.id, m.kind, m.title, m.content, m.tags_json, m.status,
                        m.priority, m.source, m.pinned, m.created_at, m.updated_at,
+                       m.source_ref, m.valid_from, m.valid_until, m.supersedes_id,
+                       m.code_hash, m.commit_sha, m.verified_at,
+                       m.related_entity_ids_json, m.session_id,
                        0.0 AS score
                 FROM memories AS m
-                WHERE {' AND '.join(clauses)} AND m.status != 'archived'
+                WHERE {' AND '.join(clauses)} AND m.status NOT IN ('archived', 'superseded')
                 ORDER BY m.pinned DESC, m.priority DESC, m.updated_at DESC
                 LIMIT ?
                 """,
                 (*parameters,),
             )
         return [_memory_dict(row) | {"score": row["score"]} for row in rows]
+
+    def verify_memory(self, memory_id: int) -> dict[str, object]:
+        cursor = self.connection.execute(
+            "UPDATE memories SET verified_at = ?, updated_at = ? WHERE id = ?",
+            (_now(), _now(), memory_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"memory not found: {memory_id}")
+        self.connection.commit()
+        return self.get_memory(memory_id)  # type: ignore[return-value]
 
     # --- project state -------------------------------------------------------
 
