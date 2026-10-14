@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
 from safe_codebase_mcp.db import IndexDatabase
@@ -227,6 +228,45 @@ class SecondBrainTests(unittest.TestCase):
         self.assertIn("Detailed implementation note", expanded["context"])
         self.assertIn(int(memory["id"]), expanded["memory_ids"])
         self.assertLessEqual(int(expanded["estimated_tokens"]), 800)
+
+    def test_existing_pre_lifecycle_database_migrates(self) -> None:
+        old_path = self.root / "old.sqlite3"
+        connection = sqlite3.connect(old_path)
+        connection.execute(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'active',
+                priority INTEGER NOT NULL DEFAULT 3,
+                source TEXT NOT NULL DEFAULT 'agent',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+        connection.close()
+        migrated = IndexDatabase(old_path)
+        try:
+            record = migrated.remember(
+                title="Migrated memory",
+                content="The lifecycle columns were added safely.",
+                kind="fact",
+                tags=[],
+                priority=3,
+                source="tool",
+                status="active",
+                pinned=False,
+            )
+            self.assertEqual([], record["related_entity_ids"])
+            self.assertIsNone(record["valid_until"])
+        finally:
+            migrated.close()
 
 
 if __name__ == "__main__":

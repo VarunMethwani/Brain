@@ -100,8 +100,6 @@ class IndexDatabase:
             );
             CREATE INDEX IF NOT EXISTS memories_kind_status_idx
                 ON memories(kind, status, priority, updated_at);
-            CREATE INDEX IF NOT EXISTS memories_validity_idx
-                ON memories(valid_from, valid_until);
             CREATE TABLE IF NOT EXISTS project_state (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL,
@@ -110,6 +108,9 @@ class IndexDatabase:
             """
         )
         self._migrate_memory_columns()
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS memories_validity_idx ON memories(valid_from, valid_until)"
+        )
         self._fts_available = self._init_memory_search()
         self.connection.commit()
 
