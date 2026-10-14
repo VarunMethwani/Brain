@@ -13,6 +13,18 @@ Adding an external provider requires a separate review. In particular, any
 future outbound feature must call `FilePolicy.validate_read` first and require
 an explicit operator opt-in.
 
+The second-brain layer stores project memory in the same private SQLite
+directory as the index. Memory is not a secret store: records have size and
+tag limits, are labeled with their source (`user`, `agent`, or `tool`), and
+reject recognizable private-key and common token formats. This is a heuristic
+guard, not a guarantee; users must still avoid saving credentials. Archived
+records remain locally recoverable and are excluded from active recall.
+
+Context packs are bounded and include a warning that both memory and source
+content are untrusted data. They are retrieval aids, not policy or executable
+instructions. The service does not claim that a fact is true merely because it
+was persisted by an agent.
+
 ## Filesystem guarantees
 
 Every source read goes through `FilePolicy`:

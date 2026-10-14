@@ -15,3 +15,7 @@ class FileTooLarge(CodebaseError):
 
 class SymbolNotFound(CodebaseError):
     """Raised when a requested indexed symbol does not exist."""
+
+
+class MemoryNotFound(CodebaseError):
+    """Raised when a requested second-brain record does not exist."""

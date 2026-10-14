@@ -1,10 +1,27 @@
-"""Small SQLite store for indexed file and symbol metadata."""
+"""SQLite store for indexed code metadata and second-brain records."""
 
 from __future__ import annotations
 
 import sqlite3
+import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _memory_dict(row: sqlite3.Row) -> dict[str, object]:
+    result = dict(row)
+    try:
+        result["tags"] = json.loads(str(result.pop("tags_json")))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result["tags"] = []
+    result["pinned"] = bool(result["pinned"])
+    return result
 
 
 class IndexDatabase:
@@ -34,9 +51,51 @@ class IndexDatabase:
             );
             CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name);
             CREATE INDEX IF NOT EXISTS symbols_path_idx ON symbols(path);
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'active',
+                priority INTEGER NOT NULL DEFAULT 3,
+                source TEXT NOT NULL DEFAULT 'agent',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS memories_kind_status_idx
+                ON memories(kind, status, priority, updated_at);
+            CREATE TABLE IF NOT EXISTS project_state (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
+        self._fts_available = self._init_memory_search()
         self.connection.commit()
+
+    def _init_memory_search(self) -> bool:
+        try:
+            self.connection.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    memory_id UNINDEXED, title, content, tags
+                )
+                """
+            )
+            self.connection.execute("DELETE FROM memory_fts")
+            self.connection.execute(
+                """
+                INSERT INTO memory_fts(memory_id, title, content, tags)
+                SELECT id, title, content, tags_json FROM memories
+                """
+            )
+            return True
+        except sqlite3.OperationalError:
+            return False
 
     def close(self) -> None:
         self.connection.close()
@@ -111,3 +170,209 @@ class IndexDatabase:
             (path, name),
         ).fetchone()
         return dict(row) if row else None
+
+    # --- second-brain memory -------------------------------------------------
+
+    def _sync_memory_search(self, memory_id: int) -> None:
+        if not self._fts_available:
+            return
+        self.connection.execute("DELETE FROM memory_fts WHERE memory_id = ?", (memory_id,))
+        row = self.connection.execute(
+            "SELECT id, title, content, tags_json FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row:
+            self.connection.execute(
+                "INSERT INTO memory_fts(memory_id, title, content, tags) VALUES (?, ?, ?, ?)",
+                (row["id"], row["title"], row["content"], row["tags_json"]),
+            )
+
+    def remember(
+        self,
+        *,
+        title: str,
+        content: str,
+        kind: str,
+        tags: list[str],
+        priority: int,
+        source: str,
+        status: str,
+        pinned: bool,
+        memory_id: int | None = None,
+    ) -> dict[str, object]:
+        timestamp = _now()
+        tags_json = json.dumps(tags, ensure_ascii=False)
+        if memory_id is None:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO memories(
+                    kind, title, content, tags_json, status, priority, source,
+                    pinned, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (kind, title, content, tags_json, status, priority, source, int(pinned), timestamp, timestamp),
+            )
+            memory_id = int(cursor.lastrowid)
+        else:
+            existing = self.connection.execute("SELECT id FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            if existing is None:
+                raise ValueError(f"memory not found: {memory_id}")
+            self.connection.execute(
+                """
+                UPDATE memories SET kind = ?, title = ?, content = ?, tags_json = ?,
+                    status = ?, priority = ?, source = ?, pinned = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (kind, title, content, tags_json, status, priority, source, int(pinned), timestamp, memory_id),
+            )
+        self._sync_memory_search(memory_id)
+        self.connection.commit()
+        return self.get_memory(memory_id)  # type: ignore[return-value]
+
+    def get_memory(self, memory_id: int) -> dict[str, object] | None:
+        row = self.connection.execute(
+            """
+            SELECT id, kind, title, content, tags_json, status, priority, source,
+                   pinned, created_at, updated_at
+            FROM memories WHERE id = ?
+            """,
+            (memory_id,),
+        ).fetchone()
+        return _memory_dict(row) if row else None
+
+    def archive_memory(self, memory_id: int) -> dict[str, object]:
+        cursor = self.connection.execute(
+            "UPDATE memories SET status = 'archived', pinned = 0, updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"memory not found: {memory_id}")
+        self.connection.commit()
+        return self.get_memory(memory_id)  # type: ignore[return-value]
+
+    def list_memories(
+        self,
+        *,
+        limit: int = 100,
+        kind: str | None = None,
+        status: str | None = "active",
+        pinned_only: bool = False,
+    ) -> list[dict[str, object]]:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if kind:
+            clauses.append("kind = ?")
+            parameters.append(kind)
+        if status:
+            clauses.append("status = ?")
+            parameters.append(status)
+        if pinned_only:
+            clauses.append("pinned = 1")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.connection.execute(
+            f"""
+            SELECT id, kind, title, content, tags_json, status, priority, source,
+                   pinned, created_at, updated_at
+            FROM memories{where}
+            ORDER BY pinned DESC, priority DESC, updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (*parameters, limit),
+        )
+        return [_memory_dict(row) for row in rows]
+
+    def list_open_tasks(self, limit: int = 100) -> list[dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            SELECT id, kind, title, content, tags_json, status, priority, source,
+                   pinned, created_at, updated_at
+            FROM memories
+            WHERE kind = 'task' AND status IN ('active', 'blocked')
+            ORDER BY CASE status WHEN 'blocked' THEN 0 ELSE 1 END,
+                     pinned DESC, priority DESC, updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [_memory_dict(row) for row in rows]
+
+    def complete_task(self, memory_id: int) -> dict[str, object]:
+        cursor = self.connection.execute(
+            "UPDATE memories SET status = 'done', pinned = 0, updated_at = ? WHERE id = ? AND kind = 'task'",
+            (_now(), memory_id),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"open task not found: {memory_id}")
+        self.connection.commit()
+        return self.get_memory(memory_id)  # type: ignore[return-value]
+
+    def search_memories(
+        self, query: str, *, limit: int = 20, kind: str | None = None
+    ) -> list[dict[str, object]]:
+        tokens = [token[:64] for token in re.findall(r"[\w-]+", query, re.UNICODE)]
+        if not tokens:
+            return []
+        if self._fts_available:
+            fts_query = " AND ".join('"' + token.replace('"', "") + '"' for token in tokens)
+            clauses = ["memory_fts MATCH ?"]
+            parameters: list[object] = [fts_query]
+            if kind:
+                clauses.append("m.kind = ?")
+                parameters.append(kind)
+            parameters.append(limit)
+            rows = self.connection.execute(
+                f"""
+                SELECT m.id, m.kind, m.title, m.content, m.tags_json, m.status,
+                       m.priority, m.source, m.pinned, m.created_at, m.updated_at,
+                       bm25(memory_fts) AS score
+                FROM memory_fts JOIN memories AS m ON m.id = memory_fts.memory_id
+                WHERE {' AND '.join(clauses)} AND m.status != 'archived'
+                ORDER BY score, m.pinned DESC, m.priority DESC, m.updated_at DESC
+                LIMIT ?
+                """,
+                (*parameters,),
+            )
+        else:
+            needle = f"%{query}%"
+            clauses = ["(m.title LIKE ? OR m.content LIKE ? OR m.tags_json LIKE ?)"]
+            parameters = [needle, needle, needle]
+            if kind:
+                clauses.append("m.kind = ?")
+                parameters.append(kind)
+            parameters.append(limit)
+            rows = self.connection.execute(
+                f"""
+                SELECT m.id, m.kind, m.title, m.content, m.tags_json, m.status,
+                       m.priority, m.source, m.pinned, m.created_at, m.updated_at,
+                       0.0 AS score
+                FROM memories AS m
+                WHERE {' AND '.join(clauses)} AND m.status != 'archived'
+                ORDER BY m.pinned DESC, m.priority DESC, m.updated_at DESC
+                LIMIT ?
+                """,
+                (*parameters,),
+            )
+        return [_memory_dict(row) | {"score": row["score"]} for row in rows]
+
+    # --- project state -------------------------------------------------------
+
+    def set_state(self, key: str, value: object) -> dict[str, object]:
+        timestamp = _now()
+        self.connection.execute(
+            """
+            INSERT INTO project_state(key, value_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                           updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(value, ensure_ascii=False), timestamp),
+        )
+        self.connection.commit()
+        return {"key": key, "value": value, "updated_at": timestamp}
+
+    def get_state(self, key: str) -> object | None:
+        row = self.connection.execute("SELECT value_json FROM project_state WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None

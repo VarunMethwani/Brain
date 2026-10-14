@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "safe-codebase-mcp"
 version = "0.1.0"
-description = "A local-first, security-hardened MCP server for searching source symbols"
+description = "A local-first, security-hardened codebase second brain for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
