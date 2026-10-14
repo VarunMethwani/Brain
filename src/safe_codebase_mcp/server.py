@@ -147,10 +147,19 @@ def create_server(root: Path | str) -> Any:
         return service.save_session_summary(title, summary, tags)
 
     @server.tool()
-    def build_context(query: str | None = None, max_chars: int = 24_000) -> dict[str, object]:
-        """Build one bounded context pack from focus, memories, tasks, and relevant code symbols."""
+    def build_context(
+        query: str | None = None,
+        profile: str = "standard",
+        max_tokens: int | None = None,
+        max_chars: int | None = None,
+    ) -> dict[str, object]:
+        """Build a task-aware, token-bounded context pack.
 
-        return service.build_context(query, max_chars)
+        ``max_chars`` is retained as a compatibility alias; new callers should
+        use ``profile`` or ``max_tokens``.
+        """
+
+        return service.build_context(query, max_tokens, profile, max_chars)
 
     return server
 

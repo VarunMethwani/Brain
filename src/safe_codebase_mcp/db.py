@@ -79,6 +79,9 @@ class IndexDatabase:
 
     def _init_memory_search(self) -> bool:
         try:
+            already_exists = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'"
+            ).fetchone()
             self.connection.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -86,13 +89,13 @@ class IndexDatabase:
                 )
                 """
             )
-            self.connection.execute("DELETE FROM memory_fts")
-            self.connection.execute(
-                """
-                INSERT INTO memory_fts(memory_id, title, content, tags)
-                SELECT id, title, content, tags_json FROM memories
-                """
-            )
+            if already_exists is None:
+                self.connection.execute(
+                    """
+                    INSERT INTO memory_fts(memory_id, title, content, tags)
+                    SELECT id, title, content, tags_json FROM memories
+                    """
+                )
             return True
         except sqlite3.OperationalError:
             return False
@@ -308,11 +311,25 @@ class IndexDatabase:
     def search_memories(
         self, query: str, *, limit: int = 20, kind: str | None = None
     ) -> list[dict[str, object]]:
-        tokens = [token[:64] for token in re.findall(r"[\w-]+", query, re.UNICODE)]
+        tokens: list[str] = []
+        for token in re.findall(r"[\w-]+", query, re.UNICODE):
+            token = token[:64]
+            tokens.append(token)
+            # A tiny, deterministic lexical expansion handles common coding
+            # language morphology without pretending to be semantic search.
+            if token.endswith("ing") and len(token) > 5:
+                tokens.append(token[:-3])
+            elif token.endswith("ed") and len(token) > 4:
+                tokens.append(token[:-2])
+            elif token.endswith("s") and len(token) > 4:
+                tokens.append(token[:-1])
+        tokens = list(dict.fromkeys(tokens))
         if not tokens:
             return []
         if self._fts_available:
-            fts_query = " AND ".join('"' + token.replace('"', "") + '"' for token in tokens)
+            # OR plus prefix matching avoids dropping useful memories merely
+            # because one natural-language term was expressed differently.
+            fts_query = " OR ".join('"' + token.replace('"', "") + '"*' for token in tokens)
             clauses = ["memory_fts MATCH ?"]
             parameters: list[object] = [fts_query]
             if kind:

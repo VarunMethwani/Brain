@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from safe_codebase_mcp.db import IndexDatabase
+from safe_codebase_mcp.context_engine import estimate_tokens
 from safe_codebase_mcp.errors import AccessDenied
 from safe_codebase_mcp.policy import FilePolicy
 from safe_codebase_mcp.service import CodebaseService
@@ -111,6 +112,28 @@ class SecondBrainTests(unittest.TestCase):
             )
         with self.assertRaises(AccessDenied):
             self.service.set_focus("api_key=1234567890abcdefghijklmnop")
+
+    def test_context_profiles_bound_the_complete_payload(self) -> None:
+        self.service.set_focus("Investigate the protection boundary", ["find the relevant symbol"])
+        self.service.remember(
+            title="Protection decision",
+            content="Keep all source reads below the resolved repository root.",
+            kind="decision",
+            pinned=True,
+        )
+        result = self.service.build_context("protect", profile="minimal")
+        self.assertEqual("minimal", result["profile"])
+        self.assertLessEqual(int(result["estimated_tokens"]), int(result["max_tokens"]))
+        self.assertEqual(int(result["estimated_tokens"]), estimate_tokens(result))
+
+    def test_recall_uses_loose_prefix_matching(self) -> None:
+        self.service.remember(
+            title="Database pool choice",
+            content="Use the PostgreSQL asyncpg pool configuration for local workers.",
+            kind="decision",
+        )
+        matches = self.service.recall("database connection pooling")["matches"]
+        self.assertTrue(any(item["title"] == "Database pool choice" for item in matches))
 
 
 if __name__ == "__main__":
