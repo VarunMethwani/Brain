@@ -7,6 +7,7 @@ from pathlib import Path
 from safe_codebase_mcp.db import IndexDatabase
 from safe_codebase_mcp.context_engine import estimate_tokens
 from safe_codebase_mcp.errors import AccessDenied
+from safe_codebase_mcp.indexer import extract_symbols
 from safe_codebase_mcp.policy import FilePolicy
 from safe_codebase_mcp.service import CodebaseService
 
@@ -134,6 +135,26 @@ class SecondBrainTests(unittest.TestCase):
         )
         matches = self.service.recall("database connection pooling")["matches"]
         self.assertTrue(any(item["title"] == "Database pool choice" for item in matches))
+
+    def test_incremental_indexing_reuses_unchanged_files(self) -> None:
+        first = self.service.index_repository()
+        second = self.service.index_repository()
+        self.assertEqual(1, first["indexed_files"])
+        self.assertEqual(0, first["unchanged_files"])
+        self.assertEqual(0, second["indexed_files"])
+        self.assertEqual(1, second["unchanged_files"])
+
+    def test_python_ast_ranges_include_nested_class_methods(self) -> None:
+        symbols = extract_symbols(
+            "class Service:\n    def run(self):\n        return True\n\nclass Other:\n    pass\n",
+            "python",
+        )
+        service = next(symbol for symbol in symbols if symbol[0] == "Service")
+        run = next(symbol for symbol in symbols if symbol[0] == "run")
+        self.assertEqual("class", service[1])
+        self.assertEqual(3, service[3])
+        self.assertEqual("method", run[1])
+        self.assertEqual(3, run[3])
 
 
 if __name__ == "__main__":

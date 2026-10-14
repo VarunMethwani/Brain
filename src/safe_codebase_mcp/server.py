@@ -25,10 +25,10 @@ def create_server(root: Path | str) -> Any:
     server = FastMCP("safe-codebase-second-brain")
 
     @server.tool()
-    def index_repository() -> dict[str, int]:
-        """Index safe source files beneath the configured repository root."""
+    def index_repository(force: bool = False) -> dict[str, int]:
+        """Index safe source files; unchanged files are reused unless force is true."""
 
-        return service.index_repository()
+        return service.index_repository(force)
 
     @server.tool()
     def list_indexed_files(limit: int = 1000) -> dict[str, object]:

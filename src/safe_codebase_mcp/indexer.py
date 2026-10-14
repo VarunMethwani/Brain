@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,7 @@ class IndexStats:
     indexed_symbols: int
     skipped_files: int
     removed_files: int
+    unchanged_files: int = 0
 
 
 _PATTERNS = (
@@ -89,7 +91,40 @@ _PATTERNS = (
 )
 
 
-def extract_symbols(text: str) -> list[tuple[str, str, int, int, str]]:
+def _extract_python_symbols(text: str) -> list[tuple[str, str, int, int, str]] | None:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+
+    symbols: list[tuple[str, str, int, int, str]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.parents: list[ast.AST] = []
+
+        def visit(self, node: ast.AST) -> None:  # type: ignore[override]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                start = int(getattr(node, "lineno", 1))
+                end = int(getattr(node, "end_lineno", start))
+                kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                if kind == "function" and any(isinstance(parent, ast.ClassDef) for parent in self.parents):
+                    kind = "method"
+                signature = " ".join(text.splitlines()[start - 1].strip().split())[:240]
+                symbols.append((node.name, kind, start, max(start, end), signature))
+            self.parents.append(node)
+            self.generic_visit(node)
+            self.parents.pop()
+
+    Visitor().visit(tree)
+    return sorted(symbols, key=lambda symbol: (symbol[2], -symbol[3], symbol[0]))
+
+
+def extract_symbols(text: str, language: str = "") -> list[tuple[str, str, int, int, str]]:
+    if language == "python":
+        parsed = _extract_python_symbols(text)
+        if parsed is not None:
+            return parsed
     lines = text.splitlines()
     found: list[tuple[str, str, int, str]] = []
     for line_number, line in enumerate(lines, start=1):
@@ -111,11 +146,12 @@ class CodebaseIndexer:
         self.policy = policy
         self.database = database
 
-    def index(self) -> IndexStats:
+    def index(self, *, force: bool = False) -> IndexStats:
         indexed_files = 0
         indexed_symbols = 0
         skipped_files = 0
         present_paths: set[str] = set()
+        unchanged_files = 0
 
         for relative in self.policy.iter_indexable_files(SUPPORTED_EXTENSIONS):
             try:
@@ -126,8 +162,18 @@ class CodebaseIndexer:
                 skipped_files += 1
                 continue
             present_paths.add(relative)
-            symbols = extract_symbols(text)
             digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+            existing = self.database.get_file_metadata(relative)
+            if (
+                not force
+                and existing is not None
+                and int(existing["size_bytes"]) == stat.st_size
+                and int(existing["mtime_ns"]) == stat.st_mtime_ns
+                and str(existing["sha256"]) == digest
+            ):
+                unchanged_files += 1
+                continue
+            symbols = extract_symbols(text, LANGUAGES.get(path.suffix.lower(), ""))
             self.database.replace_file(
                 path=relative,
                 sha256=digest,
@@ -141,4 +187,4 @@ class CodebaseIndexer:
 
         removed_files = self.database.remove_missing(present_paths)
         self.database.commit()
-        return IndexStats(indexed_files, indexed_symbols, skipped_files, removed_files)
+        return IndexStats(indexed_files, indexed_symbols, skipped_files, removed_files, unchanged_files)

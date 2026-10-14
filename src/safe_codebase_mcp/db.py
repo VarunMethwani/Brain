@@ -149,6 +149,13 @@ class IndexDatabase:
         )
         return [dict(row) for row in rows]
 
+    def get_file_metadata(self, path: str) -> dict[str, object] | None:
+        row = self.connection.execute(
+            "SELECT path, sha256, size_bytes, mtime_ns, language FROM files WHERE path = ?",
+            (path,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def search_symbols(self, query: str, limit: int = 50) -> list[dict[str, object]]:
         rows = self.connection.execute(
             """

@@ -39,13 +39,14 @@ class CodebaseService:
         self.database = database
         self.indexer = CodebaseIndexer(policy, database)
 
-    def index_repository(self) -> dict[str, int]:
-        stats: IndexStats = self.indexer.index()
+    def index_repository(self, force: bool = False) -> dict[str, int]:
+        stats: IndexStats = self.indexer.index(force=force)
         return {
             "indexed_files": stats.indexed_files,
             "indexed_symbols": stats.indexed_symbols,
             "skipped_files": stats.skipped_files,
             "removed_files": stats.removed_files,
+            "unchanged_files": stats.unchanged_files,
         }
 
     def list_files(self, limit: int = 1000) -> dict[str, object]:
